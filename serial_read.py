@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# This shows hex values as read from serial port. Useful to debug new card reader packet formats
 import serial
 import time
 import binascii

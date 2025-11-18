@@ -1,0 +1,7 @@
+RDM6300 is a cheap 125 khz RFID reader
+It transmits data by UART at 9600 baud
+Data format is as follows:
+0x02 // packet start
+0xXX // 10 hexadecimal chars of card code in ASCII
+0xYY // 2 hexadecimal chars which is xor of previous card number bytes in ASCII
+0x03 // packet end

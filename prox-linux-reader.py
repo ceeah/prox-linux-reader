@@ -99,14 +99,14 @@ async def register_client(websocket: ServerConnection) -> None:
     """Add a connected client to the in-memory registry."""
     CONNECTED_CLIENTS.add(websocket)
     peer = websocket.remote_address
-    LOGGER.debug("Client connected: %s:%s", peer[0], peer[1])
+    LOGGER.info("U-Prox Client connected: %s:%s", peer[0], peer[1])
 
 
 async def unregister_client(websocket: ServerConnection) -> None:
     """Remove a client from the registry."""
     CONNECTED_CLIENTS.discard(websocket)
     peer = websocket.remote_address
-    LOGGER.debug("Client disconnected: %s:%s", peer[0], peer[1])
+    LOGGER.debug("U-Prox Client disconnected: %s:%s", peer[0], peer[1])
 
 
 async def ws_handler(websocket: ServerConnection) -> None:

@@ -153,13 +153,13 @@ async def serial_reader(queue: "asyncio.Queue[str]", serial_port: str) -> None:
                 serial_conn = aioserial.AioSerial(port=serial_port, baudrate=BAUD_RATE, timeout=None)
                 LOGGER.info("Reader connected on %s. Ready to accept cards.", serial_port)
             except SERIAL_EXCEPTIONS as exc:
-                LOGGER.info("Waiting for reader...\r")
+                print("Waiting for reader...", end="\r")
                 LOGGER.debug(
                     "Unable to open %s (%s). Connect the reader and retrying in 1 second.",
                     serial_port,
                     exc,
                 )
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
                 continue
 
             buffer.clear()

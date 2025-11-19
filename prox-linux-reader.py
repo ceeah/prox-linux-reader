@@ -32,6 +32,7 @@ DEFAULT_SERIAL_PORT = "/dev/ttyUSB0"
 BAUD_RATE = 9600
 PACKET_START = 0x02
 PACKET_END = 0x03
+IDENTIFIER_COOLDOWN_SECONDS = 1.0
 
 CONNECTED_CLIENTS: Set[ServerConnection] = set()
 SERIAL_EXCEPTIONS = serial.SerialException
@@ -200,7 +201,7 @@ async def serial_reader(queue: "asyncio.Queue[str]", serial_port: str) -> None:
                         continue
 
                     await queue.put(card_hex)
-                    LOGGER.info("Read identifier: %s", card_hex)
+                    LOGGER.debug("Serial reader: Read identifier: %s", card_hex)
                     buffer.clear()
                 elif collecting:
                     buffer.append(value)
@@ -214,8 +215,19 @@ async def serial_reader(queue: "asyncio.Queue[str]", serial_port: str) -> None:
 
 async def identifier_dispatcher(queue: "asyncio.Queue[str]") -> None:
     """Wait for identifiers from the queue and broadcast them."""
+    loop = asyncio.get_running_loop()
+    last_seen: dict[str, float] = {}
+
     while True:
         identifier = await queue.get()
+        now = loop.time()
+        last_time = last_seen.get(identifier)
+        if last_time is not None and now - last_time < IDENTIFIER_COOLDOWN_SECONDS:
+            LOGGER.debug("Ignoring duplicate identifier %s read within %.2f seconds.", identifier, IDENTIFIER_COOLDOWN_SECONDS)
+            continue
+        last_seen[identifier] = now
+
+        LOGGER.info("Card number: %s", identifier)
         await broadcast(identifier)
 
 

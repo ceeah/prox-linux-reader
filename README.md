@@ -2,7 +2,7 @@
 This project aims to create alternative to U-Prox Desktop Reader
 
 Key features: 
-- Runs on Linux (but may as well work on Windows)
+- Runs on both Linux and Windows
 - Utilizes cheap RFID readers, such as RDM6300 (can be extended in the future)
 
 Integrates well with U-Prox WEB on Linux.

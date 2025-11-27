@@ -146,13 +146,14 @@ async def serial_reader(queue: "asyncio.Queue[str]", serial_port: str) -> None:
     """Read RFID identifiers asynchronously using aioserial."""
     buffer = bytearray()
     collecting = False
+    print(f"Connecting to reader at {serial_port}")
 
     while True:
         serial_conn = None
         try:
             try:
                 serial_conn = aioserial.AioSerial(port=serial_port, baudrate=BAUD_RATE, timeout=None)
-                LOGGER.info("Reader connected on %s. Ready to accept cards.", serial_port)
+                LOGGER.info("Reader connected. Ready to accept cards.")
             except SERIAL_EXCEPTIONS as exc:
                 print("Waiting for reader...", end="\r")
                 LOGGER.debug(
@@ -251,12 +252,16 @@ def parse_args() -> argparse.Namespace:
 
 async def main(serial_port: str) -> None:
     identifier_queue: "asyncio.Queue[str]" = asyncio.Queue()
-    async with serve(ws_handler, host=HOST, port=PORT):
-        LOGGER.debug("WebSocket server running on ws://%s:%s", HOST, PORT)
-        
-        dispatcher_task = asyncio.create_task(identifier_dispatcher(identifier_queue))
-        serial_task = asyncio.create_task(serial_reader(identifier_queue, serial_port))
-        await asyncio.gather(serial_task, dispatcher_task)
+    try:
+        async with serve(ws_handler, host=HOST, port=PORT):
+            LOGGER.debug("WebSocket server running on ws://%s:%s", HOST, PORT)
+
+            dispatcher_task = asyncio.create_task(identifier_dispatcher(identifier_queue))
+            serial_task = asyncio.create_task(serial_reader(identifier_queue, serial_port))
+            await asyncio.gather(serial_task, dispatcher_task)
+    except OSError as exc:
+        LOGGER.error("Unable to open WebSocket server on ws://%s:%s: %s.\nCheck if you have another reader running", HOST, PORT, exc)
+        await asyncio.sleep(5)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,9 @@
 ## Introduction
-This project aims to create alternative to U-Prox Desktop Reader
+This project aims to create alternative to U-Prox Desktop Reader to use cheap readers with U-Prox WEB.
 
 Key features: 
 - Runs on both Linux and Windows
 - Utilizes cheap RFID readers, such as RDM6300 (can be extended in the future)
-
-Integrates well with U-Prox WEB on Linux.
 
 ## Reader protocol
 
@@ -28,3 +26,6 @@ options:
   --log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
                         Logging level (default: INFO).
 ```
+
+## Про проект
+Ця програма дозволяє використовувати дешевші зчитувачі (наприклад, RDM6300) як альтернативу U-Prox Desktop Reader на Linux і Windows для роботи з U-Prox WEB

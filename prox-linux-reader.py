@@ -226,7 +226,9 @@ class F02DCPacketReader:
         if not payload:
             raise ValueError("Empty F02DC payload, ignoring packet.")
 
-        if card_type == 0x02:  # 125 KHz RFID
+
+        if card_type == 0x01:  # Mifare classic 1k
+            payload = F02DCPacketReader._pad_payload(payload)
             return payload.hex().upper()
 
         if card_type == 0x11:  # 13.56 MHz NFC
@@ -238,6 +240,13 @@ class F02DCPacketReader:
 
         # Fallback: return raw payload for other card types
         return payload.hex().upper()
+
+    @staticmethod
+    def _pad_payload(payload: bytes) -> bytes:
+        """Ensure payload is at least 5 bytes by left-padding with zeros."""
+        if len(payload) >= 5:
+            return payload
+        return b"\x00" * (5 - len(payload)) + payload
 
     def feed(self, byte_value: int) -> ParsedResult | None:
         if not self.collecting:

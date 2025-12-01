@@ -35,7 +35,6 @@ PACKET_START = 0x02
 PACKET_END = 0x03
 IDENTIFIER_COOLDOWN_SECONDS = 1.0
 
-CONNECTED_CLIENTS: Set[ServerConnection] = set()
 SERIAL_EXCEPTIONS = serial.SerialException
 
 
@@ -66,6 +65,53 @@ def configure_logging(level: int = logging.INFO) -> None:
 
 LOGGER = logging.getLogger("prox_linux_reader")
 ParsedResult = tuple[str, bytes]
+
+
+class UProxWebSocketServer:
+    """Manages websocket clients and broadcasting identifiers."""
+
+    def __init__(self, host: str, port: int) -> None:
+        self.host = host
+        self.port = port
+        self.connected: Set[ServerConnection] = set()
+
+    async def register(self, websocket: ServerConnection) -> None:
+        self.connected.add(websocket)
+        peer = websocket.remote_address
+        LOGGER.info("U-Prox Client connected: %s:%s", peer[0], peer[1])
+
+    async def unregister(self, websocket: ServerConnection) -> None:
+        self.connected.discard(websocket)
+        peer = websocket.remote_address
+        LOGGER.debug("U-Prox Client disconnected: %s:%s", peer[0], peer[1])
+
+    async def handler(self, websocket: ServerConnection) -> None:
+        await self.register(websocket)
+        try:
+            await websocket.wait_closed()
+        finally:
+            await self.unregister(websocket)
+
+    async def broadcast(self, identifier: str) -> None:
+        if not self.connected:
+            LOGGER.debug("No clients connected. Waiting for a connection...")
+            return
+
+        payload = json.dumps({"Identifiers": [identifier]})
+        stale_clients = []
+        sent_count = 0
+
+        for client in list(self.connected):
+            try:
+                await client.send(payload)
+                sent_count += 1
+            except Exception:
+                stale_clients.append(client)
+
+        for client in stale_clients:
+            self.connected.discard(client)
+
+        LOGGER.debug("Sent payload '%s' to %s client(s).", identifier, sent_count)
 
 
 class RDM6300PacketReader:
@@ -215,52 +261,6 @@ class F02DCPacketReader:
         return None
 
 
-async def register_client(websocket: ServerConnection) -> None:
-    """Add a connected client to the in-memory registry."""
-    CONNECTED_CLIENTS.add(websocket)
-    peer = websocket.remote_address
-    LOGGER.info("U-Prox Client connected: %s:%s", peer[0], peer[1])
-
-
-async def unregister_client(websocket: ServerConnection) -> None:
-    """Remove a client from the registry."""
-    CONNECTED_CLIENTS.discard(websocket)
-    peer = websocket.remote_address
-    LOGGER.debug("U-Prox Client disconnected: %s:%s", peer[0], peer[1])
-
-
-async def ws_handler(websocket: ServerConnection) -> None:
-    """Keep the connection alive until the client disconnects."""
-    await register_client(websocket)
-    try:
-        await websocket.wait_closed()
-    finally:
-        await unregister_client(websocket)
-
-
-async def broadcast(identifier: str) -> None:
-    """Send the identifier payload to every connected client."""
-    if not CONNECTED_CLIENTS:
-        LOGGER.debug("No clients connected. Waiting for a connection...")
-        return
-
-    payload = json.dumps({"Identifiers": [identifier]})
-    stale_clients = []
-    sent_count = 0
-
-    for client in list(CONNECTED_CLIENTS):
-        try:
-            await client.send(payload)
-            sent_count += 1
-        except Exception:
-            stale_clients.append(client)
-
-    for client in stale_clients:
-        CONNECTED_CLIENTS.discard(client)
-
-    LOGGER.debug("Sent payload '%s' to %s client(s).", identifier, sent_count)
-
-
 async def serial_reader(
     queue: "asyncio.Queue[str]",
     serial_port: str,
@@ -323,7 +323,7 @@ async def serial_reader(
         await asyncio.sleep(1)
 
 
-async def identifier_dispatcher(queue: "asyncio.Queue[str]") -> None:
+async def identifier_dispatcher(queue: "asyncio.Queue[str]", ws_server: UProxWebSocketServer) -> None:
     """Wait for identifiers from the queue and broadcast them."""
     loop = asyncio.get_running_loop()
     last_seen: dict[str, float] = {}
@@ -338,7 +338,7 @@ async def identifier_dispatcher(queue: "asyncio.Queue[str]") -> None:
         last_seen[identifier] = now
 
         LOGGER.info("Card number: %s", identifier)
-        await broadcast(identifier)
+        await ws_server.broadcast(identifier)
 
 
 def parse_args() -> argparse.Namespace:
@@ -368,6 +368,7 @@ def parse_args() -> argparse.Namespace:
 
 async def main(serial_port: str, reader_choice: str) -> None:
     identifier_queue: "asyncio.Queue[str]" = asyncio.Queue()
+    ws_server = UProxWebSocketServer(HOST, PORT)
     reader_factory: Callable[[], object]
     if reader_choice == "RDM6300":
         reader_factory = RDM6300PacketReader
@@ -375,10 +376,10 @@ async def main(serial_port: str, reader_choice: str) -> None:
         reader_factory = F02DCPacketReader
 
     try:
-        async with serve(ws_handler, host=HOST, port=PORT):
+        async with serve(ws_server.handler, host=HOST, port=PORT):
             LOGGER.debug("WebSocket server running on ws://%s:%s", HOST, PORT)
 
-            dispatcher_task = asyncio.create_task(identifier_dispatcher(identifier_queue))
+            dispatcher_task = asyncio.create_task(identifier_dispatcher(identifier_queue, ws_server))
             serial_task = asyncio.create_task(serial_reader(identifier_queue, serial_port, reader_factory))
             await asyncio.gather(serial_task, dispatcher_task)
     except OSError as exc:

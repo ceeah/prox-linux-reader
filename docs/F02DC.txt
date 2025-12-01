@@ -12,6 +12,13 @@ xx card number of length bytes
 03 end of data
 
 
+Card types
+----------
+01 Mifare classic 1k
+02 EM-Marine
+11 Mifare Plus
+
+
 Read example for 125 KHz RFID
 -----------------------------
 02 0a 02 56 5a b4 63 b3 60 03
@@ -24,3 +31,5 @@ Read example for 13.56 MHz NFC card
 
 U-Prox card number:  C0EB0E012B
 Note: byte order in U-prox is 4-5-1-2-3 
+
+

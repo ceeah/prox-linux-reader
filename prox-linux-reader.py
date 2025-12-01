@@ -68,83 +68,6 @@ LOGGER = logging.getLogger("prox_linux_reader")
 ParsedResult = tuple[str, bytes]
 
 
-def parse_rdm6300_payload(raw_payload: str) -> str:
-    """Validate RDM6300 payload and return 10 hex digits without checksum."""
-    if not raw_payload:
-        raise ValueError("Received empty payload, ignoring packet.")
-
-    if len(raw_payload) != 12:
-        raise ValueError(f"Unexpected payload length ({len(raw_payload)}): '{raw_payload}'. Ignoring packet.")
-
-    card_hex = raw_payload[:10].upper()
-    checksum_hex = raw_payload[10:]
-
-    try:
-        card_bytes = bytes.fromhex(card_hex)
-        expected_checksum = int(checksum_hex, 16)
-    except ValueError:
-        raise ValueError(f"Malformed payload '{raw_payload}', ignoring packet.") from None
-
-    computed_checksum = 0
-    for byte in card_bytes:
-        computed_checksum ^= byte
-
-    if computed_checksum != expected_checksum:
-        raise ValueError(
-            f"Checksum mismatch for payload '{raw_payload}': "
-            f"expected {expected_checksum:02X}, computed {computed_checksum:02X}. Ignoring packet."
-        )
-
-    return card_hex
-
-
-def parse_f02dc_frame(frame: bytes) -> str:
-    """Validate an F02DC frame and return the U-Prox card number."""
-    if len(frame) < 6:
-        raise ValueError("Received incomplete F02DC frame, ignoring packet.")
-
-    if frame[0] != PACKET_START or frame[-1] != PACKET_END:
-        raise ValueError("Malformed F02DC frame boundaries, ignoring packet.")
-
-    declared_length = frame[1]
-    if declared_length != len(frame):
-        raise ValueError(
-            f"F02DC length mismatch: declared {declared_length}, actual {len(frame)}. Ignoring packet."
-        )
-
-    card_type = frame[2]
-    payload = frame[3:-2]
-    bcc = frame[-2]
-
-    computed_bcc = 0
-    for byte in frame[1:-2]:
-        computed_bcc ^= byte
-
-    if computed_bcc != bcc:
-        raise ValueError(
-            f"F02DC checksum mismatch: expected {bcc:02X}, computed {computed_bcc:02X}. Ignoring packet."
-        )
-
-    if not payload:
-        raise ValueError("Empty F02DC payload, ignoring packet.")
-
-    if card_type == 0x02:  # 125 KHz RFID
-        return payload.hex().upper()
-
-    elif card_type == 0x11:  # 13.56 MHz NFC
-        if len(payload) < 5:
-            raise ValueError("F02DC NFC payload too short (expected at least 5 bytes).")
-        order = (3, 4, 0, 1, 2)
-        reordered = bytes(payload[i] for i in order if i < len(payload))
-        return reordered.hex().upper()
-
-    else:
-        # For other card types
-        return payload.hex().upper()
-
-    raise ValueError(f"Unsupported F02DC card type 0x{card_type:02X}, ignoring packet.")
-
-
 class RDM6300PacketReader:
     """Stateful parser for RDM6300 frames."""
 
@@ -157,6 +80,36 @@ class RDM6300PacketReader:
     def reset(self) -> None:
         self.buffer.clear()
         self.collecting = False
+
+    @staticmethod
+    def _parse_frame(raw_payload: str) -> str:
+        """Validate RDM6300 payload and return 10 hex digits without checksum."""
+        if not raw_payload:
+            raise ValueError("Received empty payload, ignoring packet.")
+
+        if len(raw_payload) != 12:
+            raise ValueError(f"Unexpected payload length ({len(raw_payload)}): '{raw_payload}'. Ignoring packet.")
+
+        card_hex = raw_payload[:10].upper()
+        checksum_hex = raw_payload[10:]
+
+        try:
+            card_bytes = bytes.fromhex(card_hex)
+            expected_checksum = int(checksum_hex, 16)
+        except ValueError:
+            raise ValueError(f"Malformed payload '{raw_payload}', ignoring packet.") from None
+
+        computed_checksum = 0
+        for byte in card_bytes:
+            computed_checksum ^= byte
+
+        if computed_checksum != expected_checksum:
+            raise ValueError(
+                f"Checksum mismatch for payload '{raw_payload}': "
+                f"expected {expected_checksum:02X}, computed {computed_checksum:02X}. Ignoring packet."
+            )
+
+        return card_hex
 
     def feed(self, byte_value: int) -> ParsedResult | None:
         if byte_value == PACKET_START:
@@ -173,7 +126,7 @@ class RDM6300PacketReader:
             except UnicodeDecodeError:
                 raise ValueError("Received non-ASCII data from RDM6300 reader, ignoring packet.")
 
-            card_hex = parse_rdm6300_payload(raw_payload)
+            card_hex = self._parse_frame(raw_payload)
             self.buffer.clear()
             frame_bytes = bytes([PACKET_START]) + raw_payload.encode("ascii") + bytes([PACKET_END])
             return card_hex, frame_bytes
@@ -196,6 +149,50 @@ class F02DCPacketReader:
         self.buffer.clear()
         self.collecting = False
 
+    @staticmethod
+    def _parse_frame(frame: bytes) -> str:
+        """Validate an F02DC frame and return the U-Prox card number."""
+        if len(frame) < 6:
+            raise ValueError("Received incomplete F02DC frame, ignoring packet.")
+
+        if frame[0] != PACKET_START or frame[-1] != PACKET_END:
+            raise ValueError("Malformed F02DC frame boundaries, ignoring packet.")
+
+        declared_length = frame[1]
+        if declared_length != len(frame):
+            raise ValueError(
+                f"F02DC length mismatch: declared {declared_length}, actual {len(frame)}. Ignoring packet."
+            )
+
+        card_type = frame[2]
+        payload = frame[3:-2]
+        bcc = frame[-2]
+
+        computed_bcc = 0
+        for byte in frame[1:-2]:
+            computed_bcc ^= byte
+
+        if computed_bcc != bcc:
+            raise ValueError(
+                f"F02DC checksum mismatch: expected {bcc:02X}, computed {computed_bcc:02X}. Ignoring packet."
+            )
+
+        if not payload:
+            raise ValueError("Empty F02DC payload, ignoring packet.")
+
+        if card_type == 0x02:  # 125 KHz RFID
+            return payload.hex().upper()
+
+        if card_type == 0x11:  # 13.56 MHz NFC
+            if len(payload) < 5:
+                raise ValueError("F02DC NFC payload too short (expected at least 5 bytes).")
+            order = (3, 4, 0, 1, 2)
+            reordered = bytes(payload[i] for i in order if i < len(payload))
+            return reordered.hex().upper()
+
+        # Fallback: return raw payload for other card types
+        return payload.hex().upper()
+
     def feed(self, byte_value: int) -> ParsedResult | None:
         if not self.collecting:
             if byte_value == PACKET_START:
@@ -210,7 +207,7 @@ class F02DCPacketReader:
         if byte_value == PACKET_END:
             try:
                 frame_bytes = bytes(self.buffer)
-                card_hex = parse_f02dc_frame(frame_bytes)
+                card_hex = self._parse_frame(frame_bytes)
             finally:
                 self.reset()
             return card_hex, frame_bytes

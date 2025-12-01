@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""WebSocket server that broadcasts RFID codes read from an RDM6300 (UART) reader."""
+"""U-Prox Desktop like service that broadcasts RFID codes read from supported UART readers (F02DC, RDM6300)."""
 
 import argparse
 import asyncio
 import json
 import logging
 import sys
-from typing import Set
+from typing import Callable, Set
 
 try:
     import serial, aioserial
@@ -22,13 +22,14 @@ except ImportError:  # pragma: no cover - dependency missing at runtime
 
 
 DESCRIPTION = (
-    "Linux alternative to U-Prox Desktop Reader that uses cheap RFID readers "
-    "such as the RDM6300. Integrates with U-Prox WEB on Linux."
+    "U-Prox Desktop like reader service that uses cheap RFID readers "
+    "Integrates with U-Prox WEB and U-Prox desktop client"
 )
 
 HOST = "localhost"
 PORT = 40013
 DEFAULT_SERIAL_PORT = "/dev/ttyUSB0"
+DEFAULT_READER = "F02DC"
 BAUD_RATE = 9600
 PACKET_START = 0x02
 PACKET_END = 0x03
@@ -64,6 +65,7 @@ def configure_logging(level: int = logging.INFO) -> None:
 
 
 LOGGER = logging.getLogger("prox_linux_reader")
+ParsedResult = tuple[str, bytes]
 
 
 def parse_rdm6300_payload(raw_payload: str) -> str:
@@ -94,6 +96,126 @@ def parse_rdm6300_payload(raw_payload: str) -> str:
         )
 
     return card_hex
+
+
+def parse_f02dc_frame(frame: bytes) -> str:
+    """Validate an F02DC frame and return the U-Prox card number."""
+    if len(frame) < 6:
+        raise ValueError("Received incomplete F02DC frame, ignoring packet.")
+
+    if frame[0] != PACKET_START or frame[-1] != PACKET_END:
+        raise ValueError("Malformed F02DC frame boundaries, ignoring packet.")
+
+    declared_length = frame[1]
+    if declared_length != len(frame):
+        raise ValueError(
+            f"F02DC length mismatch: declared {declared_length}, actual {len(frame)}. Ignoring packet."
+        )
+
+    card_type = frame[2]
+    payload = frame[3:-2]
+    bcc = frame[-2]
+
+    computed_bcc = 0
+    for byte in frame[1:-2]:
+        computed_bcc ^= byte
+
+    if computed_bcc != bcc:
+        raise ValueError(
+            f"F02DC checksum mismatch: expected {bcc:02X}, computed {computed_bcc:02X}. Ignoring packet."
+        )
+
+    if not payload:
+        raise ValueError("Empty F02DC payload, ignoring packet.")
+
+    if card_type == 0x02:  # 125 KHz RFID
+        return payload.hex().upper()
+
+    elif card_type == 0x11:  # 13.56 MHz NFC
+        if len(payload) < 5:
+            raise ValueError("F02DC NFC payload too short (expected at least 5 bytes).")
+        order = (3, 4, 0, 1, 2)
+        reordered = bytes(payload[i] for i in order if i < len(payload))
+        return reordered.hex().upper()
+
+    else:
+        # For other card types
+        return payload.hex().upper()
+
+    raise ValueError(f"Unsupported F02DC card type 0x{card_type:02X}, ignoring packet.")
+
+
+class RDM6300PacketReader:
+    """Stateful parser for RDM6300 frames."""
+
+    name = "RDM6300"
+
+    def __init__(self) -> None:
+        self.buffer = bytearray()
+        self.collecting = False
+
+    def reset(self) -> None:
+        self.buffer.clear()
+        self.collecting = False
+
+    def feed(self, byte_value: int) -> ParsedResult | None:
+        if byte_value == PACKET_START:
+            self.buffer.clear()
+            self.collecting = True
+            return None
+
+        if byte_value == PACKET_END and self.collecting:
+            self.collecting = False
+            if not self.buffer:
+                return None
+            try:
+                raw_payload = self.buffer.decode("ascii").strip()
+            except UnicodeDecodeError:
+                raise ValueError("Received non-ASCII data from RDM6300 reader, ignoring packet.")
+
+            card_hex = parse_rdm6300_payload(raw_payload)
+            self.buffer.clear()
+            frame_bytes = bytes([PACKET_START]) + raw_payload.encode("ascii") + bytes([PACKET_END])
+            return card_hex, frame_bytes
+
+        if self.collecting:
+            self.buffer.append(byte_value)
+        return None
+
+
+class F02DCPacketReader:
+    """Stateful parser for F02DC frames."""
+
+    name = "F02DC"
+
+    def __init__(self) -> None:
+        self.buffer = bytearray()
+        self.collecting = False
+
+    def reset(self) -> None:
+        self.buffer.clear()
+        self.collecting = False
+
+    def feed(self, byte_value: int) -> ParsedResult | None:
+        if not self.collecting:
+            if byte_value == PACKET_START:
+                self.reset()
+                self.buffer.append(byte_value)
+                self.collecting = True
+            return None
+
+        # Already collecting a frame; PACKET_START inside a frame is treated as data.
+        self.buffer.append(byte_value)
+
+        if byte_value == PACKET_END:
+            try:
+                frame_bytes = bytes(self.buffer)
+                card_hex = parse_f02dc_frame(frame_bytes)
+            finally:
+                self.reset()
+            return card_hex, frame_bytes
+
+        return None
 
 
 async def register_client(websocket: ServerConnection) -> None:
@@ -142,18 +264,21 @@ async def broadcast(identifier: str) -> None:
     LOGGER.debug("Sent payload '%s' to %s client(s).", identifier, sent_count)
 
 
-async def serial_reader(queue: "asyncio.Queue[str]", serial_port: str) -> None:
-    """Read RFID identifiers asynchronously using aioserial."""
-    buffer = bytearray()
-    collecting = False
+async def serial_reader(
+    queue: "asyncio.Queue[str]",
+    serial_port: str,
+    reader_factory: Callable[[], object],
+) -> None:
+    """Read RFID identifiers asynchronously using the selected protocol parser."""
     print(f"Connecting to reader at {serial_port}")
 
     while True:
         serial_conn = None
+        reader = reader_factory()
         try:
             try:
                 serial_conn = aioserial.AioSerial(port=serial_port, baudrate=BAUD_RATE, timeout=None)
-                LOGGER.info("Reader connected. Ready to accept cards.")
+                LOGGER.info("%s reader connected. Ready to accept cards.", getattr(reader, "name", "RFID"))
             except SERIAL_EXCEPTIONS as exc:
                 print("Waiting for reader...", end="\r")
                 LOGGER.debug(
@@ -163,9 +288,6 @@ async def serial_reader(queue: "asyncio.Queue[str]", serial_port: str) -> None:
                 )
                 await asyncio.sleep(0.5)
                 continue
-
-            buffer.clear()
-            collecting = False
 
             while True:
                 try:
@@ -180,32 +302,22 @@ async def serial_reader(queue: "asyncio.Queue[str]", serial_port: str) -> None:
                     continue
 
                 value = byte[0]
-                if value == PACKET_START:
-                    buffer.clear()
-                    collecting = True
-                elif value == PACKET_END and collecting:
-                    collecting = False
-                    if not buffer:
-                        continue
-                    try:
-                        raw_payload = buffer.decode("ascii").strip()
-                    except UnicodeDecodeError:
-                        LOGGER.warning("Received non-ASCII data from reader, ignoring packet.")
-                        buffer.clear()
-                        continue
+                try:
+                    parsed = reader.feed(value)
+                except ValueError as exc:
+                    LOGGER.warning("%s", exc)
+                    reader.reset()
+                    continue
 
-                    try:
-                        card_hex = parse_rdm6300_payload(raw_payload)
-                    except ValueError as exc:
-                        LOGGER.warning("%s", exc)
-                        buffer.clear()
-                        continue
-
-                    await queue.put(card_hex)
-                    LOGGER.debug("Serial reader: Read identifier: %s", card_hex)
-                    buffer.clear()
-                elif collecting:
-                    buffer.append(value)
+                if parsed is not None:
+                    identifier, frame_bytes = parsed
+                    LOGGER.debug(
+                        "%s reader: Raw frame %s",
+                        getattr(reader, "name", "RFID"),
+                        " ".join(f"{b:02X}" for b in frame_bytes),
+                    )
+                    await queue.put(identifier)
+                    LOGGER.debug("%s reader: Read identifier: %s", getattr(reader, "name", "RFID"), identifier)
         finally:
             if serial_conn is not None:
                 serial_conn.close()
@@ -241,6 +353,13 @@ def parse_args() -> argparse.Namespace:
         help=f"Serial device for the reader (default: {DEFAULT_SERIAL_PORT})",
     )
     parser.add_argument(
+        "-R",
+        "--reader",
+        default=DEFAULT_READER,
+        choices=["F02DC", "RDM6300"],
+        help=f"Reader protocol to use (default: {DEFAULT_READER}).",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
@@ -250,14 +369,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def main(serial_port: str) -> None:
+async def main(serial_port: str, reader_choice: str) -> None:
     identifier_queue: "asyncio.Queue[str]" = asyncio.Queue()
+    reader_factory: Callable[[], object]
+    if reader_choice == "RDM6300":
+        reader_factory = RDM6300PacketReader
+    else:
+        reader_factory = F02DCPacketReader
+
     try:
         async with serve(ws_handler, host=HOST, port=PORT):
             LOGGER.debug("WebSocket server running on ws://%s:%s", HOST, PORT)
 
             dispatcher_task = asyncio.create_task(identifier_dispatcher(identifier_queue))
-            serial_task = asyncio.create_task(serial_reader(identifier_queue, serial_port))
+            serial_task = asyncio.create_task(serial_reader(identifier_queue, serial_port, reader_factory))
             await asyncio.gather(serial_task, dispatcher_task)
     except OSError as exc:
         LOGGER.error("Unable to open WebSocket server on ws://%s:%s: %s.\nCheck if you have another reader running", HOST, PORT, exc)
@@ -268,6 +393,6 @@ if __name__ == "__main__":
     cli_args = parse_args()
     configure_logging(getattr(logging, cli_args.log_level))
     try:
-        asyncio.run(main(cli_args.device))
+        asyncio.run(main(cli_args.device, cli_args.reader))
     except KeyboardInterrupt:
         LOGGER.info("Shutting down server.")

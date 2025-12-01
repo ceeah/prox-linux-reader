@@ -6,7 +6,8 @@ import binascii
 import sys
 
 # Configure the serial port settings
-SERIAL_PORT = '/dev/ttyUSB0'
+# SERIAL_PORT = '/dev/ttyUSB0'
+SERIAL_PORT = 'COM4'
 BAUD_RATE = 9600
 
 try:
@@ -20,9 +21,6 @@ try:
         bytesize=serial.EIGHTBITS,
         parity=serial.PARITY_NONE,
         stopbits=serial.STOPBITS_ONE,
-        rtscts=False,
-        dsrdtr=False,
-        xonxoff=False
     )
     print(f"Connected to {SERIAL_PORT} at {BAUD_RATE} baud rate.")
     ser.flushInput() # Clear the input buffer

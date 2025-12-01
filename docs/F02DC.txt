@@ -1,0 +1,26 @@
+F02DC reader protocol
+=====================
+Baud: 9600
+
+Frame format
+------------
+02 header (1b)
+0c length (1b)
+11 card type (1b)
+xx card number of length bytes
+73 bcc check (xor of bytes minus head and tail of data)
+03 end of data
+
+
+Read example for 125 KHz RFID
+-----------------------------
+02 0a 02 56 5a b4 63 b3 60 03
+
+U-Prox card number: 565ab463b3
+
+Read example for 13.56 MHz NFC card
+-----------------------------------
+02 0c 11 0e 01 2b c0 eb 60 10 62 03
+
+U-Prox card number:  C0EB0E012B
+Note: byte order in U-prox is 4-5-1-2-3 

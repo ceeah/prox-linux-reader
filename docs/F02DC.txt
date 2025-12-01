@@ -1,35 +1,49 @@
-F02DC reader protocol
+F02DC Reader Protocol
 =====================
-Baud: 9600
 
-Frame format
+Overview
+--------
+- UART 9600 baud, 8N1.
+- Frames are delimited by STX/ETX (`0x02` ... `0x03`).
+
+Frame layout
 ------------
-02 header (1b)
-0c length (1b)
-11 card type (1b)
-xx card number of length bytes
-73 bcc check (xor of bytes minus head and tail of data)
-03 end of data
-
+All fields are single bytes unless noted.
+- `0x02`  : start of frame (STX)
+- `LEN`   : total frame length in bytes (including STX and ETX)
+- `TYPE`  : card type (see table below)
+- `DATA`  : card number payload (`LEN - 4` bytes)
+- `BCC`   : XOR of all bytes from `LEN` through the last payload byte
+- `0x03`  : end of frame (ETX)
 
 Card types
 ----------
-01 Mifare classic 1k
-02 EM-Marine
-11 Mifare Plus
+- `0x01` MIFARE Classic 1K  / 13.56 MHz NFC
+- `0x02` EM-Marine / 125 kHz RFID
+- `0x11` MIFARE Plus / 13.56 MHz NFC
 
+Card number extraction (U-Prox)
+-------------------------------
+- If `TYPE` is `0x02` (125 kHz): use `DATA` as-is (hex, uppercase).
+- If `TYPE` is `0x11` (13.56 MHz): reorder bytes as 4-5-1-2-3 to form the U-Prox number (hex, uppercase).
+- If the payload is shorter than 5 bytes, left-pad with `00` bytes before conversion to keep a fixed width.
+- Other types: default to the payload hex as-is.
 
-Read example for 125 KHz RFID
------------------------------
-02 0a 02 56 5a b4 63 b3 60 03
+Examples
+--------
+125 kHz RFID (EM-Marine)
+Frame: `02 0A 02 56 5A B4 63 B3 60 03`
+- LEN = 0x0A (10 bytes total)
+- TYPE = 0x02
+- DATA = `56 5A B4 63 B3`
+- BCC = XOR(0A 02 56 5A B4 63 B3) = 0x60
+- U-Prox card number: `565AB463B3`
 
-U-Prox card number: 565ab463b3
-
-Read example for 13.56 MHz NFC card
------------------------------------
-02 0c 11 0e 01 2b c0 eb 60 10 62 03
-
-U-Prox card number:  C0EB0E012B
-Note: byte order in U-prox is 4-5-1-2-3 
-
+13.56 MHz NFC (MIFARE Plus)
+Frame: `02 0C 11 0E 01 2B C0 EB 60 10 62 03`
+- LEN = 0x0C (12 bytes total)
+- TYPE = 0x11
+- DATA = `0E 01 2B C0 EB 60 10`
+- BCC = XOR(0C 11 0E 01 2B C0 EB 60 10) = 0x62
+- U-Prox card number: reorder 4-5-1-2-3 -> `C0 EB 0E 01 2B` => `C0EB0E012B`
 

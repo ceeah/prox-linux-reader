@@ -113,11 +113,18 @@ class UProxWebSocketServer:
 
         LOGGER.debug("Sent payload '%s' to %s client(s).", identifier, sent_count)
 
+# Human readable card type names
+CARD_TYPES = {
+    0x01: "Mifare Classic 13.56",
+    0x02: "EM-Marine 125",
+    0x11: "Mifare Plus 13.56" 
+}
 
 class RDM6300PacketReader:
-    """Stateful parser for RDM6300 frames."""
+    """Stateful parser for RDM6300 125 khz reader frames."""
 
     name = "RDM6300"
+    card_type = 0x02 # Always EM-Marine
 
     def __init__(self) -> None:
         self.buffer = bytearray()
@@ -155,7 +162,7 @@ class RDM6300PacketReader:
                 f"expected {expected_checksum:02X}, computed {computed_checksum:02X}. Ignoring packet."
             )
 
-        return card_hex
+        return card_hex, RDM6300PacketReader.card_type
 
     def feed(self, byte_value: int) -> ParsedResult | None:
         if byte_value == PACKET_START:
@@ -172,10 +179,10 @@ class RDM6300PacketReader:
             except UnicodeDecodeError:
                 raise ValueError("Received non-ASCII data from RDM6300 reader, ignoring packet.")
 
-            card_hex = self._parse_frame(raw_payload)
+            card_hex, card_type = self._parse_frame(raw_payload)
             self.buffer.clear()
             frame_bytes = bytes([PACKET_START]) + raw_payload.encode("ascii") + bytes([PACKET_END])
-            return card_hex, frame_bytes
+            return card_hex, card_type, rame_bytes
 
         if self.collecting:
             self.buffer.append(byte_value)
@@ -183,7 +190,7 @@ class RDM6300PacketReader:
 
 
 class F02DCPacketReader:
-    """Stateful parser for F02DC frames."""
+    """Stateful parser for F02DC universal reader frames."""
 
     name = "F02DC"
 
@@ -227,19 +234,19 @@ class F02DCPacketReader:
             raise ValueError("Empty F02DC payload, ignoring packet.")
 
 
-        if card_type == 0x01:  # Mifare classic 1k
+        # Special parsing for some card types for U-Prox compatibility
+        
+        if card_type == 0x01:  # 13.56 Mhz Mifare classic 1k
             payload = F02DCPacketReader._pad_payload(payload)
-            return payload.hex().upper()
 
-        if card_type == 0x11:  # 13.56 MHz NFC
+        if card_type == 0x11:  # 13.56 MHz Mifare Plus
             if len(payload) < 5:
                 raise ValueError("F02DC NFC payload too short (expected at least 5 bytes).")
             order = (3, 4, 0, 1, 2)
             reordered = bytes(payload[i] for i in order if i < len(payload))
-            return reordered.hex().upper()
-
-        # Fallback: return raw payload for other card types
-        return payload.hex().upper()
+            payload = reordered
+ 
+        return payload.hex().upper(), card_type
 
     @staticmethod
     def _pad_payload(payload: bytes) -> bytes:
@@ -262,10 +269,10 @@ class F02DCPacketReader:
         if byte_value == PACKET_END:
             try:
                 frame_bytes = bytes(self.buffer)
-                card_hex = self._parse_frame(frame_bytes)
+                card_hex, card_type = self._parse_frame(frame_bytes)
             finally:
                 self.reset()
-            return card_hex, frame_bytes
+            return card_hex, card_type, frame_bytes
 
         return None
 
@@ -316,14 +323,14 @@ async def serial_reader(
                     continue
 
                 if parsed is not None:
-                    identifier, frame_bytes = parsed
+                    identifier, card_type, frame_bytes = parsed
                     LOGGER.debug(
                         "%s reader: Raw frame %s",
                         getattr(reader, "name", "RFID"),
                         " ".join(f"{b:02X}" for b in frame_bytes),
                     )
-                    await queue.put(identifier)
-                    LOGGER.debug("%s reader: Read identifier: %s", getattr(reader, "name", "RFID"), identifier)
+                    await queue.put((identifier, card_type))
+                    LOGGER.debug("%s reader: Read identifier: %s (type %s)", getattr(reader, "name", "RFID"), identifier, CARD_TYPES.get(card_type, f"Other: ({card_type})"))
         finally:
             if serial_conn is not None:
                 serial_conn.close()
@@ -332,13 +339,13 @@ async def serial_reader(
         await asyncio.sleep(1)
 
 
-async def identifier_dispatcher(queue: "asyncio.Queue[str]", ws_server: UProxWebSocketServer) -> None:
+async def identifier_dispatcher(queue: "asyncio.Queue[str, int]", ws_server: UProxWebSocketServer) -> None:
     """Wait for identifiers from the queue and broadcast them."""
     loop = asyncio.get_running_loop()
     last_seen: dict[str, float] = {}
 
     while True:
-        identifier = await queue.get()
+        identifier, card_type = await queue.get()
         now = loop.time()
         last_time = last_seen.get(identifier)
         if last_time is not None and now - last_time < IDENTIFIER_COOLDOWN_SECONDS:
@@ -346,6 +353,7 @@ async def identifier_dispatcher(queue: "asyncio.Queue[str]", ws_server: UProxWeb
             continue
         last_seen[identifier] = now
 
+        LOGGER.info("\nType: %02x / %s", card_type, CARD_TYPES.get(card_type, "Other"))
         LOGGER.info("Card number: %s", identifier)
         await ws_server.broadcast(identifier)
 
